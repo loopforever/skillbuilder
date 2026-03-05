@@ -2,7 +2,7 @@
 
 Analyzes a large codebase and generates `SKILL.md` files that agentic coding assistants (Claude Code, Cursor, etc.) can use to understand your project's conventions.
 
-**Zero external dependencies** — uses only the Python 3.10+ standard library. Talks directly to Ollama, LM Studio, vLLM, llama.cpp, or any OpenAI-compatible local LLM server via raw HTTP.
+**Zero external dependencies** — uses only the Python 3.10+ standard library. Talks to any OpenAI-compatible LLM server (OpenAI, Ollama, LM Studio, vLLM, llama.cpp, etc.) via raw HTTP.
 
 ## Key Features
 
@@ -62,30 +62,39 @@ projects.
 |-------------------|----------------------------------------|--------------------------------------|
 | `java-models`     | `**/model/*.java`                      | Java model/entity classes            |
 | `java-daos`       | `**/dao/*DAO.java`                     | Java Data Access Objects             |
-| `java-actionbeans`| `**/action/*Action.java`               | Java ActionBean controllers  |
+| `java-actionbeans`| `**/action/*Action.java`               | Java ActionBean controllers          |
 | `frontend`        | `**/*.css`, `**/*.js`, `**/*.mjs`, `**/*.vm` | Front-end templates & code     |
 
 ## Setup
 
-No `pip install` needed. Just have Python 3.10+ and a local LLM server.
+No `pip install` needed. Just have Python 3.10+ and an LLM server.
 
 ### LLM Server
 
-The tool talks to your LLM over HTTP. Supported servers:
+The tool talks to your LLM over HTTP using the OpenAI-compatible API by default.
+It auto-detects Ollama when the URL contains port 11434 or `/ollama`.
 
-| Server       | Example                                                                     |
-|-------------|------------------------------------------------------------------------------|
-| **Ollama**   | `python generate_skills.py /src` (default, port 11434)                      |
-| **vLLM**     | `--api-base http://host:8000 --api-type openai --model meta-llama/Llama-3.1-8B` |
-| **SGLang**   | `--api-base http://host:30000 --api-type openai --model qwen2.5`           |
-| **LM Studio**| `--api-base http://localhost:1234 --api-type openai`                        |
-| **llama.cpp**| `--api-base http://localhost:8080 --api-type openai`                        |
+| Server            | Example                                                                     |
+|-------------------|------------------------------------------------------------------------------|
+| **OpenAI**        | `python generate_skills.py /src --model gpt-4o` (default api-base)          |
+| **Ollama**        | `--api-base http://localhost:11434 --model llama3.1`                        |
+| **vLLM**          | `--api-base http://host:8000 --model meta-llama/Llama-3.1-8B`              |
+| **SGLang**        | `--api-base http://host:30000 --model qwen2.5`                             |
+| **LM Studio**     | `--api-base http://localhost:1234`                                          |
+| **llama.cpp**     | `--api-base http://localhost:8080`                                          |
 
 ### Authentication
 
+The tool reads your API key from the `OPENAI_API_KEY` environment variable automatically.
+You can also pass it explicitly:
+
 ```bash
-# Bearer token (sent as Authorization: Bearer <key>)
+# Explicit Bearer token (sent as Authorization: Bearer <key>)
 python generate_skills.py /src --api-key tok_abc123
+
+# Or use the environment variable (auto-detected)
+export OPENAI_API_KEY=sk-...
+python generate_skills.py /src
 
 # Custom auth header (e.g. X-API-Key)
 python generate_skills.py /src --header "X-API-Key: my-secret-token"
@@ -99,36 +108,41 @@ python generate_skills.py /src --api-key ignored --header "Authorization: Token 
 
 ## Usage
 
-### Basic (Ollama on default port)
+### Basic (OpenAI)
 
 ```bash
-python generate_skills.py /path/to/codebase
+export OPENAI_API_KEY=sk-...
+python generate_skills.py /path/to/codebase --model gpt-4o
 ```
 
 ### Specifying Model and Server
 
 ```bash
-# Different Ollama model
-python generate_skills.py /path/to/codebase --model codellama:34b
+# Ollama on localhost (auto-detected as Ollama by port)
+python generate_skills.py /path/to/codebase \
+    --api-base http://localhost:11434 \
+    --model llama3.1
 
 # vLLM on a GPU box (just pass host:port, /v1 is added automatically)
 python generate_skills.py /path/to/codebase \
     --api-base http://gpu-box:8000 \
-    --api-type openai \
     --model meta-llama/Llama-3.1-8B-Instruct
 
 # SGLang with auth
 python generate_skills.py /path/to/codebase \
     --api-base http://localhost:30000 \
-    --api-type openai \
     --api-key my-token \
     --model qwen2.5
 
 # LM Studio
-python generate_skills.py /path/to/codebase --api-base http://localhost:1234 --api-type openai
+python generate_skills.py /path/to/codebase \
+    --api-base http://localhost:1234
 
-# Server on another machine on your LAN
-python generate_skills.py /path/to/codebase --api-base http://192.168.1.50:11434 --model llama3.1
+# Force Ollama API protocol explicitly
+python generate_skills.py /path/to/codebase \
+    --api-base http://192.168.1.50:11434 \
+    --api-type ollama \
+    --model llama3.1
 ```
 
 ### Common Options
@@ -164,9 +178,11 @@ positional arguments:
 
 options:
   --model MODEL          Model name as your LLM server knows it (default: llama3.1)
-  --api-base URL         Base URL of your LLM server (default: http://localhost:11434)
-  --api-type TYPE        "ollama", "openai", or "auto" (default: auto)
-  --api-key KEY          Bearer token for Authorization header (default: none)
+  --api-base URL         Base URL of your LLM server (default: https://api.openai.com)
+  --api-type TYPE        "ollama", "openai", or "auto" (default: auto — detects
+                         Ollama by port 11434, otherwise uses OpenAI-compatible)
+  --api-key KEY          Bearer token for Authorization header. Falls back to
+                         OPENAI_API_KEY env var if not provided.
   --header 'Name: val'   Extra HTTP header(s), repeatable (default: none)
   --sample-size N        Files to deeply analyze per category (default: 20)
   --context-budget N     Your LLM's context window in tokens (default: 100000)
