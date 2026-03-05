@@ -22,6 +22,7 @@ Usage:
     python generate_skills.py /path/to/codebase --sample-size 15 --output-dir ./my-skills
     python generate_skills.py /path/to/codebase --categories java-models java-daos
     python generate_skills.py /path/to/codebase --resume  # pick up where you left off
+    python generate_skills.py /path/to/codebase --parallel 8  # 8 concurrent LLM requests
 """
 
 import argparse
@@ -31,10 +32,12 @@ import os
 import random
 import shutil
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -255,6 +258,12 @@ CHARS_PER_TOKEN = 3.5
 
 # Module-level token budget, set from --context-budget CLI arg
 _token_budget = 100_000
+
+# Module-level max parallel LLM requests, set from --parallel CLI arg
+_max_workers = 4
+
+# Lock for thread-safe console output
+_print_lock = threading.Lock()
 
 
 def _truncate_source(text: str, max_chars: int) -> str:
@@ -509,6 +518,49 @@ def _proportional_allocate(group_sizes: Dict[str, int], total_slots: int) -> Dic
     return allocation
 
 
+def _analyze_single_file(
+    p: str,
+    cat: str,
+    cat_dir: Path,
+    skeletons: dict,
+    file_to_project: dict,
+    category_label: str,
+    index: int,
+    total: int,
+    t0: float,
+) -> Tuple[str, str]:
+    """Analyze a single file (called from thread pool). Returns (path, analysis_text)."""
+    cache_file = cat_dir / (_cache_key(p) + ".analysis.md")
+    if cache_file.exists():
+        with _print_lock:
+            print(f"  [{cat}] ({index}/{total}) cached: {Path(p).name}")
+        return p, cache_file.read_text()
+
+    project_name = file_to_project.get(p, "") if file_to_project else ""
+    with _print_lock:
+        print(f"  [{cat}] ({index}/{total}) analyzing: {Path(p).name} [project={project_name}] ({_elapsed(t0)})")
+    skeleton = skeletons[cat][p]
+
+    # Read raw source, truncated to fit comfortably in context
+    try:
+        raw = Path(p).read_text(errors="replace")
+        raw = _truncate_source(raw, int(_char_budget() * 0.4))
+    except Exception:
+        raw = "[could not read file]"
+
+    prompt = build_analysis_prompt(
+        category=category_label,
+        file_path=p,
+        skeleton=skeleton,
+        raw_source=raw,
+        project_name=project_name,
+    )
+
+    result = call_llm(prompt)
+    cache_file.write_text(result)
+    return p, result
+
+
 def phase_analyze(
     sampled: dict,
     skeletons: dict,
@@ -524,35 +576,31 @@ def phase_analyze(
         category_label = CATEGORIES[cat]["label"]
 
         t0 = time.time()
-        for i, p in enumerate(paths, 1):
-            cache_file = cat_dir / (_cache_key(p) + ".analysis.md")
-            if cache_file.exists():
-                print(f"  [{cat}] ({i}/{len(paths)}) cached: {Path(p).name}")
-                analyses[cat][p] = cache_file.read_text()
-                continue
 
-            project_name = file_to_project.get(p, "") if file_to_project else ""
-            print(f"  [{cat}] ({i}/{len(paths)}) analyzing: {Path(p).name} [project={project_name}] ({_elapsed(t0)})")
-            skeleton = skeletons[cat][p]
-
-            # Read raw source, truncated to fit comfortably in context
-            try:
-                raw = Path(p).read_text(errors="replace")
-                raw = _truncate_source(raw, int(_char_budget() * 0.4))
-            except Exception:
-                raw = "[could not read file]"
-
-            prompt = build_analysis_prompt(
-                category=category_label,
-                file_path=p,
-                skeleton=skeleton,
-                raw_source=raw,
-                project_name=project_name,
-            )
-
-            result = call_llm(prompt)
-            cache_file.write_text(result)
-            analyses[cat][p] = result
+        if _max_workers <= 1:
+            # Sequential path — same behaviour as before
+            for i, p in enumerate(paths, 1):
+                _, result = _analyze_single_file(
+                    p, cat, cat_dir, skeletons,
+                    file_to_project or {}, category_label,
+                    i, len(paths), t0,
+                )
+                analyses[cat][p] = result
+        else:
+            # Parallel path
+            with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+                futures = {
+                    pool.submit(
+                        _analyze_single_file,
+                        p, cat, cat_dir, skeletons,
+                        file_to_project or {}, category_label,
+                        i, len(paths), t0,
+                    ): p
+                    for i, p in enumerate(paths, 1)
+                }
+                for future in as_completed(futures):
+                    filepath, result = future.result()
+                    analyses[cat][filepath] = result
 
     return analyses
 
@@ -588,23 +636,33 @@ def _hierarchical_reduce(
 
         print(f"    [{label}] reduce level {level}: {len(current)} chunks -> {len(batches)} batches")
 
-        next_level = []
-        for bi, batch in enumerate(batches):
+        next_level = [None] * len(batches)
+
+        def _reduce_batch(bi, batch):
             cache_file = cache_dir / f"batch_{bi}.md"
             if cache_file.exists():
-                next_level.append(cache_file.read_text())
-                continue
-
+                return bi, cache_file.read_text()
             if len(batch) == 1:
-                # Single chunk that already fits — pass through
-                next_level.append(batch[0])
                 cache_file.write_text(batch[0])
-                continue
-
+                return bi, batch[0]
             prompt = reduce_prompt_fn(batch)
             result = call_llm(prompt)
             cache_file.write_text(result)
-            next_level.append(result)
+            return bi, result
+
+        if _max_workers <= 1 or len(batches) <= 1:
+            for bi, batch in enumerate(batches):
+                _, result = _reduce_batch(bi, batch)
+                next_level[bi] = result
+        else:
+            with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+                futures = [
+                    pool.submit(_reduce_batch, bi, batch)
+                    for bi, batch in enumerate(batches)
+                ]
+                for future in as_completed(futures):
+                    bi, result = future.result()
+                    next_level[bi] = result
 
         current = next_level
 
@@ -1068,6 +1126,13 @@ LLM server compatibility:
              "so prompts fit in context. (default: 100000)",
     )
     parser.add_argument(
+        "--parallel",
+        type=int,
+        default=4,
+        help="Max concurrent LLM requests. Set to 1 to disable parallelism. "
+             "(default: 4)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -1078,8 +1143,9 @@ LLM server compatibility:
     random.seed(args.seed)
 
     # Set the global token budget for batch sizing
-    global _token_budget
+    global _token_budget, _max_workers
     _token_budget = args.context_budget
+    _max_workers = max(1, args.parallel)
 
     # Parse --header flags into a dict
     extra_headers = {}
@@ -1130,6 +1196,7 @@ LLM server compatibility:
     print(f" categories: {', '.join(args.categories)}")
     if args.projects:
         print(f" projects:   {', '.join(args.projects)}")
+    print(f" parallel:   {_max_workers} worker(s)")
     print(f" sample:     {args.sample_size} files/category")
     print(f"{'='*60}\n")
 
