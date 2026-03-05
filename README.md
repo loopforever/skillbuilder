@@ -2,7 +2,7 @@
 
 Analyzes a large codebase and generates `SKILL.md` files that agentic coding assistants (Claude Code, Cursor, etc.) can use to understand your project's conventions.
 
-**Zero external dependencies** — uses only the Python 3.10+ standard library. Talks to any OpenAI-compatible LLM server (OpenAI, Ollama, LM Studio, vLLM, llama.cpp, etc.) via raw HTTP.
+**Zero external dependencies** — uses only the Python 3.6+ standard library. Talks to any OpenAI-compatible LLM server (OpenAI, Ollama, LM Studio, vLLM, llama.cpp, etc.) via raw HTTP.
 
 ## Key Features
 
@@ -67,7 +67,7 @@ projects.
 
 ## Setup
 
-No `pip install` needed. Just have Python 3.10+ and an LLM server.
+No `pip install` needed. Just have Python 3.6+ and an LLM server.
 
 ### LLM Server
 
