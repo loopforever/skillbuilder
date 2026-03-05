@@ -27,8 +27,8 @@ Phase 0: Discover         Find all files matching each category's glob patterns.
 Phase 1: Extract          Build structural skeletons (no LLM) — strips method bodies,
                           keeps signatures, annotations, class structure, and adds
                           ordering + naming metadata annotations. ~5-10x compression.
-Phase 1b: Sample          Stratified sampling by project first, then by directory,
-                          then by complexity. Guarantees cross-project coverage.
+Phase 1b: Sample          Stratified sampling by project, directory, and complexity
+                          (default), or most-recently-modified files (--recent-files).
 Phase 2: Analyze          LLM analyzes each sampled file individually (one file per call).
                           Each analysis is tagged with the file's project name.
 Phase 2b: Skeleton Scan   LLM scans skeletons of remaining files in batches for broad coverage.
@@ -163,6 +163,12 @@ python generate_skills.py /src --resume
 # Run validation against unseen files
 python generate_skills.py /src --validate
 
+# Sample the N most recently modified files instead of random stratified sampling
+python generate_skills.py /src --recent-files
+
+# Combine with --sample-size to control how many recent files
+python generate_skills.py /src --recent-files --sample-size 30
+
 # Faster run: skip the broad skeleton overview
 python generate_skills.py /src --skip-skeleton-overview
 
@@ -198,6 +204,8 @@ options:
   --clean                Clear cache and start fresh
   --skip-skeleton-overview  Skip broad skeleton scan (faster)
   --seed N               Random seed for sampling (default: 42)
+  --recent-files         Sample the N most recently modified files (by mtime)
+                         instead of stratified random sampling
 ```
 
 ## Output

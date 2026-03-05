@@ -379,10 +379,13 @@ def phase_sample(
     sample_size: int,
     work_dir: Path,
     file_to_project: dict = None,
+    recent: bool = False,
 ) -> dict:
     """
-    Pick representative files per category using stratified sampling.
-    Stratifies by project first, then by directory within each project —
+    Pick representative files per category.
+
+    When *recent* is True the N most recently modified files are chosen
+    (by filesystem mtime).  Otherwise uses stratified random sampling that
     guarantees coverage across different projects and codepath areas.
     """
     sampled = {}
@@ -391,6 +394,8 @@ def phase_sample(
         if selection_file.exists():
             selected = json.loads(selection_file.read_text())
             selected = [s for s in selected if s in skeletons.get(cat, {})]
+        elif recent:
+            selected = _recent_sample(paths, sample_size)
         else:
             selected = _stratified_sample(
                 paths, skeletons.get(cat, {}), sample_size,
@@ -475,6 +480,25 @@ def _stratified_sample(
         selected.extend(remaining[: n - len(selected)])
 
     return selected[:n]
+
+
+def _recent_sample(paths: List[str], n: int) -> List[str]:
+    """
+    Select the *n* most recently modified files (by mtime, descending).
+    Falls back gracefully if a file has been removed between discovery and
+    sampling — missing files sort to the bottom.
+    """
+    if len(paths) <= n:
+        return paths
+
+    def _mtime(p: str) -> float:
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+
+    by_mtime = sorted(paths, key=_mtime, reverse=True)
+    return by_mtime[:n]
 
 
 def _proportional_allocate(group_sizes: Dict[str, int], total_slots: int) -> Dict[str, int]:
@@ -1138,6 +1162,12 @@ LLM server compatibility:
         default=42,
         help="Random seed for reproducible sampling (default: 42)",
     )
+    parser.add_argument(
+        "--recent-files",
+        action="store_true",
+        help="Sample the N most recently modified files (by mtime) instead of "
+             "using stratified random sampling. N is controlled by --sample-size.",
+    )
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -1197,7 +1227,8 @@ LLM server compatibility:
     if args.projects:
         print(f" projects:   {', '.join(args.projects)}")
     print(f" parallel:   {_max_workers} worker(s)")
-    print(f" sample:     {args.sample_size} files/category")
+    sampling_label = "most-recent (mtime)" if args.recent_files else f"stratified (seed={args.seed})"
+    print(f" sample:     {args.sample_size} files/category ({sampling_label})")
     print(f"{'='*60}\n")
 
     print("[Phase 0] Discovering files ...")
@@ -1232,10 +1263,12 @@ LLM server compatibility:
     for cat, s in skeletons.items():
         print(f"  {cat}: {len(s)} skeletons extracted")
 
-    print("\n[Phase 1b] Sampling representative files ...")
+    sampling_mode = "most-recent by mtime" if args.recent_files else "stratified random"
+    print(f"\n[Phase 1b] Sampling representative files ({sampling_mode}) ...")
     sampled = phase_sample(
         files_by_cat, skeletons, args.sample_size, work_dir,
         file_to_project=file_to_project,
+        recent=args.recent_files,
     )
 
     print("\n[Phase 2] Per-file LLM analysis ...")
