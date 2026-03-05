@@ -170,7 +170,7 @@ def _build_request_openai(messages: List[dict], temperature: float) -> tuple:
 
 def _parse_response_ollama(body: dict) -> str:
     """Extract text from an Ollama response."""
-    return body.get("message", {}).get("content", "").strip()
+    return (body.get("message", {}).get("content") or "").strip()
 
 
 def _parse_response_openai(body: dict) -> str:
@@ -178,7 +178,7 @@ def _parse_response_openai(body: dict) -> str:
     choices = body.get("choices", [])
     if not choices:
         raise ValueError(f"Empty choices in response: {json.dumps(body)[:500]}")
-    return choices[0].get("message", {}).get("content", "").strip()
+    return (choices[0].get("message", {}).get("content") or "").strip()
 
 
 def call_llm(prompt: str, system: str = "", max_retries: int = 3) -> str:
