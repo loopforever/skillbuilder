@@ -290,9 +290,14 @@ def _elapsed(start: float) -> str:
     return f"{secs/60:.1f}m"
 
 
-def phase_discover(root_dir: str, category_keys: List[str]) -> Tuple[dict, List[str], dict]:
+def phase_discover(
+    root_dir: str,
+    category_keys: List[str],
+    project_whitelist: Optional[List[str]] = None,
+) -> Tuple[dict, List[str], dict]:
     """
     Phase 0: find all files per category, detect projects, and map files to projects.
+    If project_whitelist is provided, only files belonging to those projects are kept.
     Returns (files_by_cat, project_names, file_to_project).
     """
     all_files = discover_files(root_dir)
@@ -305,6 +310,27 @@ def phase_discover(root_dir: str, category_keys: List[str]) -> Tuple[dict, List[
     for cat, paths in files_by_cat.items():
         for p in paths:
             file_to_project[p] = get_file_project(p, root_dir)
+
+    # Apply project whitelist filter
+    if project_whitelist is not None:
+        whitelist_set = set(project_whitelist)
+        unknown = whitelist_set - set(projects)
+        if unknown:
+            print(
+                f"  Warning: unknown project(s): {', '.join(sorted(unknown))}. "
+                f"Available: {', '.join(projects)}",
+                file=sys.stderr,
+            )
+        projects = [p for p in projects if p in whitelist_set]
+        for cat in files_by_cat:
+            files_by_cat[cat] = [
+                p for p in files_by_cat[cat]
+                if file_to_project.get(p) in whitelist_set
+            ]
+        file_to_project = {
+            p: proj for p, proj in file_to_project.items()
+            if proj in whitelist_set
+        }
 
     return files_by_cat, projects, file_to_project
 
@@ -1007,6 +1033,14 @@ LLM server compatibility:
         help="Which categories to process (default: all)",
     )
     parser.add_argument(
+        "--projects",
+        nargs="+",
+        default=None,
+        metavar="NAME",
+        help="Only process these projects (immediate subdirectory names). "
+             "By default all projects are included.",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume from cached intermediate results",
@@ -1094,11 +1128,15 @@ LLM server compatibility:
     print(f" model:      {args.model}")
     print(f" context:    {args.context_budget:,} tokens (~{_char_budget():,} char budget)")
     print(f" categories: {', '.join(args.categories)}")
+    if args.projects:
+        print(f" projects:   {', '.join(args.projects)}")
     print(f" sample:     {args.sample_size} files/category")
     print(f"{'='*60}\n")
 
     print("[Phase 0] Discovering files ...")
-    files_by_cat, projects, file_to_project = phase_discover(str(root), args.categories)
+    files_by_cat, projects, file_to_project = phase_discover(
+        str(root), args.categories, project_whitelist=args.projects,
+    )
     for cat, paths in files_by_cat.items():
         # Report per-project breakdown
         proj_counts = Counter(file_to_project.get(p, "?") for p in paths)
