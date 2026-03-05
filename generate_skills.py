@@ -36,6 +36,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from extractors import (
     discover_files, discover_projects, get_file_project,
@@ -67,7 +68,7 @@ def configure_llm(
     model: str,
     api_type: str = "auto",
     api_key: str = "",
-    extra_headers: dict | None = None,
+    extra_headers: Optional[Dict] = None,
 ):
     """
     Set the module-level LLM configuration.
@@ -134,7 +135,7 @@ def _build_headers() -> dict:
     return headers
 
 
-def _build_request_ollama(messages: list[dict], temperature: float) -> tuple:
+def _build_request_ollama(messages: List[dict], temperature: float) -> tuple:
     """Build an Ollama /api/chat request. Returns (url, payload_bytes, headers)."""
     url = _resolve_endpoint_url()
     payload = {
@@ -150,7 +151,7 @@ def _build_request_ollama(messages: list[dict], temperature: float) -> tuple:
     return url, data, _build_headers()
 
 
-def _build_request_openai(messages: list[dict], temperature: float) -> tuple:
+def _build_request_openai(messages: List[dict], temperature: float) -> tuple:
     """Build an OpenAI-compatible /v1/chat/completions request."""
     url = _resolve_endpoint_url()
     payload = {
@@ -289,9 +290,14 @@ def _elapsed(start: float) -> str:
     return f"{secs/60:.1f}m"
 
 
-def phase_discover(root_dir: str, category_keys: list[str]) -> tuple[dict, list[str], dict]:
+def phase_discover(
+    root_dir: str,
+    category_keys: List[str],
+    project_whitelist: Optional[List[str]] = None,
+) -> Tuple[dict, List[str], dict]:
     """
     Phase 0: find all files per category, detect projects, and map files to projects.
+    If project_whitelist is provided, only files belonging to those projects are kept.
     Returns (files_by_cat, project_names, file_to_project).
     """
     all_files = discover_files(root_dir)
@@ -304,6 +310,27 @@ def phase_discover(root_dir: str, category_keys: list[str]) -> tuple[dict, list[
     for cat, paths in files_by_cat.items():
         for p in paths:
             file_to_project[p] = get_file_project(p, root_dir)
+
+    # Apply project whitelist filter
+    if project_whitelist is not None:
+        whitelist_set = set(project_whitelist)
+        unknown = whitelist_set - set(projects)
+        if unknown:
+            print(
+                f"  Warning: unknown project(s): {', '.join(sorted(unknown))}. "
+                f"Available: {', '.join(projects)}",
+                file=sys.stderr,
+            )
+        projects = [p for p in projects if p in whitelist_set]
+        for cat in files_by_cat:
+            files_by_cat[cat] = [
+                p for p in files_by_cat[cat]
+                if file_to_project.get(p) in whitelist_set
+            ]
+        file_to_project = {
+            p: proj for p, proj in file_to_project.items()
+            if proj in whitelist_set
+        }
 
     return files_by_cat, projects, file_to_project
 
@@ -376,11 +403,11 @@ def phase_sample(
 
 
 def _stratified_sample(
-    paths: list[str],
+    paths: List[str],
     skeletons: dict,
     n: int,
     file_to_project: dict = None,
-) -> list[str]:
+) -> List[str]:
     """
     Two-level stratified sampling:
       1. Allocate slots across projects proportionally
@@ -391,7 +418,7 @@ def _stratified_sample(
         return paths
 
     # Level 1: group by project
-    project_groups: dict[str, list[str]] = {}
+    project_groups = {}  # type: Dict[str, List[str]]
     for p in paths:
         proj = file_to_project.get(p, "_unknown") if file_to_project else "_all"
         project_groups.setdefault(proj, []).append(p)
@@ -409,7 +436,7 @@ def _stratified_sample(
             continue
 
         # Level 2: within this project, group by directory
-        dir_groups: dict[str, list[str]] = {}
+        dir_groups = {}  # type: Dict[str, List[str]]
         for p in members:
             d = str(Path(p).parent)
             dir_groups.setdefault(d, []).append(p)
@@ -441,7 +468,7 @@ def _stratified_sample(
     return selected[:n]
 
 
-def _proportional_allocate(group_sizes: dict[str, int], total_slots: int) -> dict[str, int]:
+def _proportional_allocate(group_sizes: Dict[str, int], total_slots: int) -> Dict[str, int]:
     """
     Allocate total_slots across groups proportionally to size.
     Each group gets at least 1 slot (if slots permit).
@@ -531,7 +558,7 @@ def phase_analyze(
 
 
 def _hierarchical_reduce(
-    chunks: list[str],
+    chunks: List[str],
     reduce_prompt_fn,
     label: str,
     work_dir: Path,
@@ -589,13 +616,13 @@ def _hierarchical_reduce(
     return current[0] if current else ""
 
 
-def _pack_batches(chunks: list[str], char_budget: int) -> list[list[str]]:
+def _pack_batches(chunks: List[str], char_budget: int) -> List[List[str]]:
     """
     Pack chunks into batches where each batch's total length fits in char_budget.
     Greedy first-fit. A single chunk larger than the budget gets its own batch.
     """
-    batches: list[list[str]] = []
-    current_batch: list[str] = []
+    batches = []  # type: List[List[str]]
+    current_batch = []  # type: List[str]
     current_size = 0
 
     for chunk in chunks:
@@ -649,7 +676,7 @@ def phase_skeleton_overview(
 
         # Build chunks: each chunk is a group of skeletons formatted together
         # Pre-group by directory for locality
-        by_dir: dict[str, list[tuple[str, str]]] = {}
+        by_dir = {}  # type: Dict[str, List[Tuple[str, str]]]
         for p, s in remaining.items():
             d = str(Path(p).parent)
             by_dir.setdefault(d, []).append((p, s))
@@ -669,7 +696,8 @@ def phase_skeleton_overview(
             else:
                 formatted_chunks.append(text)
 
-        def skeleton_reduce_prompt(texts: list[str]) -> str:
+        def skeleton_reduce_prompt(texts):
+            # type: (List[str]) -> str
             combined = "\n\n---\n\n".join(texts)
             return (
                 f"Below are structural skeletons of {category_label} files from a codebase.\n"
@@ -755,7 +783,8 @@ def phase_synthesize(
         else:
             print(f"  [{cat}] synthesizing SKILL.md (hierarchical, {len(analysis_chunks)} chunks) ...")
 
-            def analysis_reduce_prompt(texts: list[str]) -> str:
+            def analysis_reduce_prompt(texts):
+                # type: (List[str]) -> str
                 combined = "\n\n---\n\n".join(texts)
                 return (
                     f"Below are pattern analyses of multiple {category_label} files "
@@ -787,7 +816,8 @@ def phase_synthesize(
                 print(f"    [{cat}] also reducing skeleton overview ...")
                 paras = [p for p in skel_overview.split("\n\n") if p.strip()]
                 if paras:
-                    def skel_merge_prompt(texts: list[str]) -> str:
+                    def skel_merge_prompt(texts):
+                        # type: (List[str]) -> str
                         combined = "\n\n".join(texts)
                         return (
                             f"Consolidate these pattern observations about {category_label} "
@@ -839,7 +869,7 @@ def phase_validate(
             continue
 
         # Stratified by directory, pick from different projects
-        by_dir: dict[str, list[str]] = {}
+        by_dir = {}  # type: Dict[str, List[str]]
         for p in unseen:
             d = str(Path(p).parent)
             by_dir.setdefault(d, []).append(p)
@@ -1003,6 +1033,14 @@ LLM server compatibility:
         help="Which categories to process (default: all)",
     )
     parser.add_argument(
+        "--projects",
+        nargs="+",
+        default=None,
+        metavar="NAME",
+        help="Only process these projects (immediate subdirectory names). "
+             "By default all projects are included.",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume from cached intermediate results",
@@ -1090,11 +1128,15 @@ LLM server compatibility:
     print(f" model:      {args.model}")
     print(f" context:    {args.context_budget:,} tokens (~{_char_budget():,} char budget)")
     print(f" categories: {', '.join(args.categories)}")
+    if args.projects:
+        print(f" projects:   {', '.join(args.projects)}")
     print(f" sample:     {args.sample_size} files/category")
     print(f"{'='*60}\n")
 
     print("[Phase 0] Discovering files ...")
-    files_by_cat, projects, file_to_project = phase_discover(str(root), args.categories)
+    files_by_cat, projects, file_to_project = phase_discover(
+        str(root), args.categories, project_whitelist=args.projects,
+    )
     for cat, paths in files_by_cat.items():
         # Report per-project breakdown
         proj_counts = Counter(file_to_project.get(p, "?") for p in paths)

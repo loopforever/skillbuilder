@@ -15,6 +15,7 @@ import re
 from collections import Counter
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
 # Category definitions
@@ -74,7 +75,7 @@ CATEGORIES = {
 # Project detection
 # ---------------------------------------------------------------------------
 
-def discover_projects(root_dir: str) -> list[str]:
+def discover_projects(root_dir: str) -> List[str]:
     """
     Detect projects: immediate subdirectories of root_dir.
     Returns sorted list of project names.
@@ -108,7 +109,7 @@ def get_file_project(filepath: str, root_dir: str) -> str:
 # File discovery
 # ---------------------------------------------------------------------------
 
-def discover_files(root_dir: str) -> dict[str, list[str]]:
+def discover_files(root_dir: str) -> Dict[str, List[str]]:
     """Walk root_dir and return {category: [filepaths]} for all categories."""
     root = Path(root_dir).resolve()
     result = {}
@@ -382,7 +383,7 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
     return "\n".join(out)
 
 
-def _classify_field(line: str, annotations: list[str]) -> dict:
+def _classify_field(line: str, annotations: List[str]) -> dict:
     """Classify a field by visibility, static/final, and type."""
     is_static = "static " in line
     is_final = "final " in line
@@ -422,7 +423,7 @@ def _classify_field(line: str, annotations: list[str]) -> dict:
     }
 
 
-def _classify_method(line: str, annotations: list[str]) -> dict:
+def _classify_method(line: str, annotations: List[str]) -> dict:
     """Classify a method by type (constructor, getter, setter, lifecycle, etc.)."""
     is_static = "static " in line
     is_override = any("@Override" in a for a in annotations)
@@ -497,7 +498,7 @@ def _detect_naming_style(name: str) -> str:
     return "lowercase"
 
 
-def _dedup_consecutive(items: list[str]) -> list[str]:
+def _dedup_consecutive(items: List[str]) -> List[str]:
     """Remove consecutive duplicates: [A, A, B, A] -> [A, B, A]."""
     result = []
     for item in items:
@@ -507,8 +508,8 @@ def _dedup_consecutive(items: list[str]) -> list[str]:
 
 
 def _build_ordering_summary(
-    fields: list[tuple[str, dict]],
-    methods: list[tuple[str, dict]],
+    fields: List[Tuple[str, dict]],
+    methods: List[Tuple[str, dict]],
 ) -> str:
     """Produce a compact summary of member ordering in the class."""
     order_parts = []
@@ -524,7 +525,7 @@ def _build_ordering_summary(
     return " | ".join(order_parts)
 
 
-def _analyze_method_naming(names: list[str]) -> str:
+def _analyze_method_naming(names: List[str]) -> str:
     """Analyze method naming patterns and produce a summary."""
     prefixes = Counter()
     for name in names:
@@ -627,9 +628,9 @@ def _clean_method_sig(line: str) -> str:
     return line.split("{")[0].strip() + ";"
 
 
-def _group_imports(imports: list[str]) -> list[str]:
+def _group_imports(imports: List[str]) -> List[str]:
     """Group imports by top-level package, show count if many."""
-    groups: dict[str, list[str]] = {}
+    groups = {}  # type: Dict[str, List[str]]
     for imp in imports:
         clean = imp.replace("import ", "").replace("static ", "").strip()
         top = clean.split(".")[0] if "." in clean else clean

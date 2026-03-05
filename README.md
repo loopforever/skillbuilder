@@ -2,7 +2,7 @@
 
 Analyzes a large codebase and generates `SKILL.md` files that agentic coding assistants (Claude Code, Cursor, etc.) can use to understand your project's conventions.
 
-**Zero external dependencies** — uses only the Python 3.10+ standard library. Talks to any OpenAI-compatible LLM server (OpenAI, Ollama, LM Studio, vLLM, llama.cpp, etc.) via raw HTTP.
+**Zero external dependencies** — uses only the Python 3.6+ standard library. Talks to any OpenAI-compatible LLM server (OpenAI, Ollama, LM Studio, vLLM, llama.cpp, etc.) via raw HTTP.
 
 ## Key Features
 
@@ -67,7 +67,7 @@ projects.
 
 ## Setup
 
-No `pip install` needed. Just have Python 3.10+ and an LLM server.
+No `pip install` needed. Just have Python 3.6+ and an LLM server.
 
 ### LLM Server
 
@@ -151,6 +151,9 @@ python generate_skills.py /path/to/codebase \
 # Only process specific categories
 python generate_skills.py /src --categories java-models java-daos
 
+# Only process specific projects (subdirectories of root_dir)
+python generate_skills.py /src --projects project1 project3
+
 # Analyze more files per category for better coverage
 python generate_skills.py /src --sample-size 20
 
@@ -189,6 +192,7 @@ options:
   --output-dir DIR       Where to write final SKILL.md files
   --work-dir DIR         Cache directory for intermediate results
   --categories [...]     Which categories to process (default: all)
+  --projects NAME [...]  Only process these projects (default: all)
   --resume               Reuse cached intermediate results
   --validate             Run validation against unseen files
   --clean                Clear cache and start fresh
