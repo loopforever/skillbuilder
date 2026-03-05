@@ -225,6 +225,8 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
     """
     Extract package, imports, class structure, fields, and method signatures.
     Also produces ordering and naming metadata to help identify conventions.
+    Additionally captures formatting patterns: line breaks between members,
+    one-line method bodies, getter/setter proximity, and brace placement.
     """
     lines = source.split("\n")
     sections = {
@@ -241,6 +243,20 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
         "constants": [],    # static final fields (subset of fields)
     }
 
+    # Formatting tracking
+    formatting = {
+        "brace_same_line": 0,       # opening { on same line as declaration
+        "brace_next_line": 0,       # opening { on its own line
+        "one_line_methods": 0,      # methods whose body is a single line (incl. braces)
+        "multi_line_methods": 0,    # methods with multi-line bodies
+        "one_line_getters": 0,      # single-line getter methods
+        "one_line_setters": 0,      # single-line setter methods
+        "member_line_numbers": [],  # (line_number, member_type, kind) for proximity analysis
+        "blank_lines_between": [],  # count of blank lines between consecutive members
+        "getter_setter_pairs": 0,   # getter immediately followed by setter (or vice versa)
+        "class_brace_same_line": False,  # class opening brace style
+    }
+
     # --- Single-pass extraction ---
     i = 0
     brace_depth = 0
@@ -248,6 +264,8 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
     current_annotations = []
     method_body_depth = 0
     in_method_body = False
+    method_start_line = 0
+    last_member_line = -1  # line number of last field or method declaration
 
     while i < len(lines):
         line = lines[i].strip()
@@ -271,6 +289,8 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
             current_annotations = []
             in_class_body = True
             brace_depth = line.count("{") - line.count("}")
+            # Track class brace style
+            formatting["class_brace_same_line"] = "{" in line
 
         # Inside class body
         elif in_class_body and not in_method_body:
@@ -278,6 +298,13 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
 
             # Field declaration
             if _is_field_declaration(line):
+                # Track blank lines between consecutive members
+                if last_member_line >= 0:
+                    blank_count = _count_blank_lines_between(lines, last_member_line, i)
+                    formatting["blank_lines_between"].append(blank_count)
+                annotation_start = i - len(current_annotations)
+                last_member_line = i
+
                 field_entry = ""
                 if current_annotations:
                     field_entry = " ".join(current_annotations) + " "
@@ -287,10 +314,17 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
                 sections["fields"].append((field_entry, fclass))
                 if fclass["is_constant"]:
                     sections["constants"].append(field_entry)
+                formatting["member_line_numbers"].append((i, "field", fclass["kind"]))
                 current_annotations = []
 
             # Method declaration
             elif _is_method_declaration(line):
+                # Track blank lines between consecutive members
+                if last_member_line >= 0:
+                    annotation_start = i - len(current_annotations)
+                    blank_count = _count_blank_lines_between(lines, last_member_line, annotation_start if current_annotations else i)
+                    formatting["blank_lines_between"].append(blank_count)
+
                 sig = ""
                 if current_annotations:
                     sig = "\n".join(current_annotations) + "\n"
@@ -298,14 +332,34 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
                 # Classify the method
                 mclass = _classify_method(line, current_annotations)
                 sections["methods"].append((sig, mclass))
+                formatting["member_line_numbers"].append((i, "method", mclass["kind"]))
                 current_annotations = []
+                method_start_line = i
 
-                # Track if we need to skip the method body
+                # Track brace placement style for methods
                 if "{" in line:
+                    formatting["brace_same_line"] += 1
                     net = line.count("{") - line.count("}")
-                    if net > 0:
+                    # Check for one-liner: opening and closing brace on same line
+                    if net == 0 and "}" in line:
+                        # Entire method on one line: e.g. public String getName() { return name; }
+                        mclass["is_one_liner"] = True
+                        formatting["one_line_methods"] += 1
+                        if mclass["kind"] == "GETTER":
+                            formatting["one_line_getters"] += 1
+                        elif mclass["kind"] == "SETTER":
+                            formatting["one_line_setters"] += 1
+                        last_member_line = i
+                    elif net > 0:
                         in_method_body = True
                         method_body_depth = net
+                        mclass["is_one_liner"] = False
+                else:
+                    # Opening brace might be on the next line
+                    # Look ahead for it
+                    if i + 1 < len(lines) and lines[i + 1].strip() == "{":
+                        formatting["brace_next_line"] += 1
+                    mclass["is_one_liner"] = False
 
             # Inner class
             elif _is_class_declaration(line):
@@ -321,15 +375,35 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
                 if line and not line.startswith("//") and not line.startswith("*"):
                     current_annotations = []
 
-        # Skip method bodies
+        # Skip method bodies — but track body length
         elif in_method_body:
             brace_depth += line.count("{") - line.count("}")
             method_body_depth += line.count("{") - line.count("}")
             if method_body_depth <= 0:
                 in_method_body = False
                 method_body_depth = 0
+                body_lines = i - method_start_line
+                last_member_line = i
+                # Classify as one-liner if the body is just 1 statement line
+                # (method_start has {, one statement, then } on line i)
+                if body_lines <= 2:
+                    formatting["one_line_methods"] += 1
+                    last_method = sections["methods"][-1][1] if sections["methods"] else None
+                    if last_method:
+                        last_method["is_one_liner"] = True
+                        if last_method["kind"] == "GETTER":
+                            formatting["one_line_getters"] += 1
+                        elif last_method["kind"] == "SETTER":
+                            formatting["one_line_setters"] += 1
+                else:
+                    formatting["multi_line_methods"] += 1
 
         i += 1
+
+    # Detect getter/setter proximity pairs
+    formatting["getter_setter_pairs"] = _count_getter_setter_pairs(
+        formatting["member_line_numbers"]
+    )
 
     # --- Format output with ordering & naming metadata ---
     out = []
@@ -357,6 +431,12 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
         out.append(f"  // [MEMBER ORDER: {order_summary}]")
         out.append("")
 
+    # --- Formatting & style summary ---
+    fmt_summary = _build_formatting_summary(formatting, sections)
+    if fmt_summary:
+        out.append(f"  // [FORMATTING: {fmt_summary}]")
+        out.append("")
+
     # --- Fields with classification ---
     if sections["fields"]:
         out.append("  // --- Fields ---")
@@ -377,8 +457,11 @@ def _extract_java_skeleton(source: str, filepath: str) -> str:
             kind = mclass["kind"]
             if kind != prev_kind and prev_kind is not None:
                 out.append(f"  // [{kind}]")
+            one_liner_tag = " [ONE-LINE]" if mclass.get("is_one_liner") else ""
             for mline in text.split("\n"):
                 out.append(f"  {mline}")
+            if one_liner_tag:
+                out.append(f"  // ^{one_liner_tag}")
             out.append("")
         # Method naming summary
         method_names = [mc["name"] for _, mc in sections["methods"] if mc.get("name")]
@@ -594,6 +677,93 @@ def _build_naming_summary(sections: dict) -> str:
     return ", ".join(parts)
 
 
+def _count_blank_lines_between(lines: list, from_line: int, to_line: int) -> int:
+    """Count consecutive blank lines between two member declarations."""
+    blank = 0
+    for idx in range(from_line + 1, min(to_line, len(lines))):
+        stripped = lines[idx].strip()
+        if stripped == "":
+            blank += 1
+        elif stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+            # Comments don't break blank-line counting
+            continue
+        else:
+            break
+    return blank
+
+
+def _count_getter_setter_pairs(member_line_numbers: list) -> int:
+    """Count how many times a GETTER is immediately followed by a SETTER (or vice versa)."""
+    pairs = 0
+    method_entries = [(ln, kind) for ln, mtype, kind in member_line_numbers if mtype == "method"]
+    for idx in range(len(method_entries) - 1):
+        cur_kind = method_entries[idx][1]
+        next_kind = method_entries[idx + 1][1]
+        if (cur_kind == "GETTER" and next_kind == "SETTER") or \
+           (cur_kind == "SETTER" and next_kind == "GETTER"):
+            pairs += 1
+    return pairs
+
+
+def _build_formatting_summary(formatting: dict, sections: dict) -> str:
+    """Produce a compact summary of code formatting patterns observed."""
+    parts = []
+
+    # Brace placement style
+    same = formatting["brace_same_line"]
+    nxt = formatting["brace_next_line"]
+    if same + nxt > 0:
+        if nxt == 0:
+            parts.append("braces=same-line")
+        elif same == 0:
+            parts.append("braces=next-line")
+        else:
+            parts.append(f"braces=same-line({same})/next-line({nxt})")
+
+    # Class brace style
+    if formatting["class_brace_same_line"]:
+        parts.append("class-brace=same-line")
+    elif sections["class_declaration"]:
+        parts.append("class-brace=next-line")
+
+    # One-line methods
+    one = formatting["one_line_methods"]
+    multi = formatting["multi_line_methods"]
+    if one + multi > 0:
+        if one > 0:
+            details = []
+            if formatting["one_line_getters"]:
+                details.append(f"getters={formatting['one_line_getters']}")
+            if formatting["one_line_setters"]:
+                details.append(f"setters={formatting['one_line_setters']}")
+            other = one - formatting["one_line_getters"] - formatting["one_line_setters"]
+            if other > 0:
+                details.append(f"other={other}")
+            parts.append(f"one-line-methods={one}({', '.join(details)})")
+        if multi > 0:
+            parts.append(f"multi-line-methods={multi}")
+
+    # Getter/setter pair proximity
+    if formatting["getter_setter_pairs"] > 0:
+        parts.append(f"getter-setter-pairs={formatting['getter_setter_pairs']}")
+
+    # Blank-line spacing patterns between members
+    blanks = formatting["blank_lines_between"]
+    if blanks:
+        from collections import Counter as _Counter
+        blank_counts = _Counter(blanks)
+        dominant = blank_counts.most_common(1)[0]
+        if len(blank_counts) == 1:
+            parts.append(f"member-spacing={dominant[0]}-blank-lines")
+        else:
+            spacing_desc = ", ".join(
+                f"{count}bl({freq})" for count, freq in blank_counts.most_common()
+            )
+            parts.append(f"member-spacing=[{spacing_desc}]")
+
+    return ", ".join(parts)
+
+
 def _is_class_declaration(line: str) -> bool:
     return bool(
         re.match(
@@ -679,7 +849,15 @@ def _extract_css_skeleton(source: str, filepath: str) -> str:
     custom_props = []
     media_queries = []
 
-    for line in lines:
+    # Formatting tracking for CSS
+    brace_same_line = 0   # selector { on same line
+    brace_next_line = 0   # { on its own line after selector
+    one_line_rules = 0    # .foo { color: red; } on one line
+    blank_between_rules = []
+
+    last_rule_end = -1
+
+    for idx, line in enumerate(lines):
         stripped = line.strip()
 
         # Custom properties
@@ -695,6 +873,54 @@ def _extract_css_skeleton(source: str, filepath: str) -> str:
             sel = stripped.split("{")[0].strip()
             if sel and not sel.startswith("*"):
                 selectors.append(sel)
+
+            # Track brace style and one-line rules
+            if sel:
+                brace_same_line += 1
+                if "}" in stripped:
+                    one_line_rules += 1
+
+                # Track blank lines between rule blocks
+                if last_rule_end >= 0:
+                    bl = 0
+                    for bi in range(last_rule_end + 1, idx):
+                        if lines[bi].strip() == "":
+                            bl += 1
+                        else:
+                            break
+                    blank_between_rules.append(bl)
+
+        if stripped == "}" or stripped.endswith("}"):
+            last_rule_end = idx
+
+        # Check for next-line brace: selector on one line, { alone on next
+        if stripped and not stripped.startswith("/*") and not stripped.startswith("//"):
+            if "{" not in stripped and "}" not in stripped and ";" not in stripped:
+                if idx + 1 < len(lines) and lines[idx + 1].strip() == "{":
+                    brace_next_line += 1
+
+    # Formatting summary
+    fmt_parts = []
+    if brace_same_line + brace_next_line > 0:
+        if brace_next_line == 0:
+            fmt_parts.append("braces=same-line")
+        elif brace_same_line == 0:
+            fmt_parts.append("braces=next-line")
+        else:
+            fmt_parts.append(f"braces=same-line({brace_same_line})/next-line({brace_next_line})")
+    if one_line_rules > 0:
+        fmt_parts.append(f"one-line-rules={one_line_rules}")
+    if blank_between_rules:
+        from collections import Counter as _Ctr
+        bc = _Ctr(blank_between_rules)
+        dominant = bc.most_common(1)[0]
+        if len(bc) == 1:
+            fmt_parts.append(f"rule-spacing={dominant[0]}-blank-lines")
+        else:
+            spacing = ", ".join(f"{c}bl({f})" for c, f in bc.most_common())
+            fmt_parts.append(f"rule-spacing=[{spacing}]")
+    if fmt_parts:
+        out.append(f"\n/* [FORMATTING: {', '.join(fmt_parts)}] */")
 
     if custom_props:
         out.append("\n/* Custom Properties */")
@@ -747,7 +973,12 @@ def _extract_js_skeleton(source: str, filepath: str) -> str:
     classes = []
     vue_component = False
 
-    for line in lines:
+    # Formatting tracking for JS
+    brace_same_line = 0
+    brace_next_line = 0
+    one_line_functions = 0
+
+    for idx, line in enumerate(lines):
         stripped = line.strip()
 
         if stripped.startswith("import ") or stripped.startswith("from "):
@@ -763,12 +994,24 @@ def _extract_js_skeleton(source: str, filepath: str) -> str:
             vue_component = True
 
         # Standalone function declarations
-        if re.match(r"^(async\s+)?function\s+\w+", stripped):
+        func_match = re.match(r"^(async\s+)?function\s+\w+", stripped)
+        if func_match:
             exports.append(stripped.split("{")[0].strip())
+            # Track brace style
+            if "{" in stripped:
+                brace_same_line += 1
+                if stripped.endswith("}") or stripped.endswith("};"):
+                    one_line_functions += 1
+            elif idx + 1 < len(lines) and lines[idx + 1].strip() == "{":
+                brace_next_line += 1
 
         # Class declarations
         if re.match(r"^(export\s+)?(default\s+)?class\s+", stripped):
             classes.append(stripped.split("{")[0].strip())
+            if "{" in stripped:
+                brace_same_line += 1
+            elif idx + 1 < len(lines) and lines[idx + 1].strip() == "{":
+                brace_next_line += 1
 
         # Arrow functions assigned to const/let
         match = re.match(r"^(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(", stripped)
@@ -782,6 +1025,20 @@ def _extract_js_skeleton(source: str, filepath: str) -> str:
 
     if vue_component:
         out.append("// [Vue Component detected]")
+
+    # Formatting summary
+    fmt_parts = []
+    if brace_same_line + brace_next_line > 0:
+        if brace_next_line == 0:
+            fmt_parts.append("braces=same-line")
+        elif brace_same_line == 0:
+            fmt_parts.append("braces=next-line")
+        else:
+            fmt_parts.append(f"braces=same-line({brace_same_line})/next-line({brace_next_line})")
+    if one_line_functions > 0:
+        fmt_parts.append(f"one-line-functions={one_line_functions}")
+    if fmt_parts:
+        out.append(f"// [FORMATTING: {', '.join(fmt_parts)}]")
 
     if imports:
         out.append("\n// --- Imports ---")
@@ -884,6 +1141,30 @@ def _extract_vm_skeleton(source: str, filepath: str) -> str:
             out.append(f"  .{c}")
         if len(css_classes) > 40:
             out.append(f"  ... and {len(css_classes) - 40} more")
+
+    # Detect Velocity directive brace/block style
+    vm_block_same = 0
+    vm_block_next = 0
+    for idx, vline in enumerate(lines):
+        vs = vline.strip()
+        # #if, #foreach, #macro etc. — check if block content starts same line
+        if re.match(r'^#(if|foreach|macro|else|elseif)\b', vs):
+            # Content after the directive on the same line (beyond the condition)
+            after = re.sub(r'^#\w+\s*\(.*?\)', '', vs).strip()
+            if after:
+                vm_block_same += 1
+            else:
+                vm_block_next += 1
+    if vm_block_same + vm_block_next > 0:
+        fmt_parts = []
+        if vm_block_next == 0:
+            fmt_parts.append("directive-body=same-line")
+        elif vm_block_same == 0:
+            fmt_parts.append("directive-body=next-line")
+        else:
+            fmt_parts.append(f"directive-body=same-line({vm_block_same})/next-line({vm_block_next})")
+        out.append(f"\n### Formatting")
+        out.append(f"  [FORMATTING: {', '.join(fmt_parts)}]")
 
     return "\n".join(out)
 
