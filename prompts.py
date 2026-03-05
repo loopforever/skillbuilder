@@ -130,7 +130,58 @@ analyses of many other files, so every detail matters.
 Use clear markdown headers. Be specific — quote exact annotation names, method signatures,
 field names, and naming patterns. Include short code snippets (1-3 lines) to illustrate patterns.
 Do NOT summarize what the file does functionally — focus only on structural patterns,
-naming conventions, and ordering."""
+naming conventions, and ordering.
+
+## IMPORTANT: Structured Data Block
+
+After your prose analysis, you MUST include a fenced JSON block labeled `STRUCTURED_DATA`.
+This block is merged deterministically across files, so populate every field you can observe.
+Use `null` for fields you cannot determine. Arrays should list ALL observed values.
+
+```json STRUCTURED_DATA
+{{
+  "naming": {{
+    "class_name": "<exact class name>",
+    "class_casing": "PascalCase|camelCase|other",
+    "class_suffix": "<suffix like DAO, Service, Action, or null>",
+    "method_casing": "camelCase|snake_case|other",
+    "method_prefixes": ["get", "set", "find", "..."],
+    "field_casing": "camelCase|snake_case|other",
+    "field_prefix": "<e.g. m_, s_, or null>",
+    "boolean_naming": ["isXxx", "hasXxx", "xxxEnabled", "..."],
+    "constant_casing": "SCREAMING_SNAKE_CASE|other",
+    "param_casing": "camelCase|snake_case|other"
+  }},
+  "ordering": {{
+    "imports": ["<group1>", "<group2>", "..."],
+    "fields": ["CONSTANT", "STATIC", "PUBLIC_FIELD", "PRIVATE_FIELD", "..."],
+    "methods": ["CONSTRUCTOR", "GETTER", "SETTER", "PUBLIC_METHOD", "PRIVATE_HELPER", "..."]
+  }},
+  "annotations": {{
+    "class_level": ["@Annotation1", "@Annotation2"],
+    "field_level": ["@Column", "..."],
+    "method_level": ["@Override", "..."]
+  }},
+  "formatting": {{
+    "brace_style": "same-line|next-line|mixed",
+    "class_brace_style": "same-line|next-line",
+    "one_line_getters": true,
+    "one_line_setters": true,
+    "blank_lines_between_fields": 0,
+    "blank_lines_between_methods": 1,
+    "getter_setter_adjacent": true,
+    "single_statement_braces": true
+  }},
+  "patterns": {{
+    "design_patterns": ["Builder", "Factory", "..."],
+    "error_handling": "exceptions|error_codes|Optional|null_checks",
+    "null_handling": "Optional|@Nullable|null_checks|none",
+    "base_class": "<extends ClassName or null>",
+    "interfaces": ["InterfaceName", "..."],
+    "standard_methods": ["toString", "equals", "hashCode", "..."]
+  }}
+}}
+```"""
 
 
 def build_synthesis_prompt(
@@ -138,6 +189,8 @@ def build_synthesis_prompt(
     analyses_text: str,
     skeleton_overview: str = "",
     project_stats: str = "",
+    skeleton_stats: str = "",
+    max_skill_lines: int = 800,
 ) -> str:
     """
     Prompt for Phase 3: synthesize per-file analyses into a SKILL.md.
@@ -165,6 +218,17 @@ def build_synthesis_prompt(
 {project_stats}
 """
 
+    skeleton_stats_section = ""
+    if skeleton_stats:
+        skeleton_stats_section = f"""
+
+## Aggregated Skeleton Statistics
+(Hard numbers extracted deterministically from ALL file skeletons — these are authoritative
+and should take priority over any conflicting prose observations)
+
+{skeleton_stats}
+"""
+
     return f"""You are writing a SKILL.md file — a reference document that an AI coding assistant will
 read before creating or modifying **{category}** files in this codebase.
 
@@ -175,7 +239,7 @@ capture BOTH universal patterns and project-specific deviations.
 ## Context
 Below are detailed analyses of multiple {category} files from the codebase, drawn from
 various projects. Your job is to synthesize these into a single, authoritative SKILL.md.
-{skeleton_section}{project_section}
+{skeleton_section}{project_section}{skeleton_stats_section}
 
 ## Per-File Analyses
 
@@ -273,6 +337,13 @@ Note the expected ordering of annotations when multiple are stacked.]
 
 [How errors are handled in this category of file]
 
+## Rare / Notable Patterns
+
+[IMPORTANT: If any analyses include a 'Rare/Notable Patterns' section with patterns
+observed in only 1-2 files, document them here. These may represent important
+project-specific conventions, edge cases, or emerging patterns. List each with
+which file(s)/project(s) exhibited it.]
+
 ## Do's and Don'ts
 
 [Explicit list of conventions to follow and anti-patterns to avoid.
@@ -305,7 +376,7 @@ all the universal patterns above. This should be 30-60 lines, not a full product
 - Be specific: use actual annotation names, method signatures, field names as examples.
 - Prefer showing code over describing code.
 - The audience is an AI coding assistant. Be precise and unambiguous.
-- Keep the total document under 500 lines. Prioritize the template, ordering, and naming."""
+- Keep the total document under {max_skill_lines} lines. Prioritize the template, ordering, and naming."""
 
 
 def build_validation_prompt(

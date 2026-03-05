@@ -13,6 +13,16 @@ Analyzes a large codebase and generates `SKILL.md` files that agentic coding ass
   parameters — casing style, prefix/suffix patterns, verb conventions.
 - **Ordering convention extraction**: How fields, methods, imports, and annotations
   are ordered within a file. Skeletons include machine-readable ordering metadata.
+- **High-fidelity distillation**: Structured JSON data travels alongside prose analysis
+  and is merged deterministically, bypassing LLM summarization loss. Skeleton formatting
+  stats (brace placement, spacing, method styles) are aggregated across ALL files and
+  injected as authoritative hard numbers into synthesis.
+- **Rare pattern preservation**: Patterns observed in only 1–2 files are preserved in
+  a dedicated section through every reduction phase, preventing minority conventions
+  from being silently dropped.
+- **Near-duplicate deduplication**: Jaccard-similarity-based deduplication removes
+  redundant chunks before LLM reduction, so the model spends capacity on genuinely
+  distinct patterns.
 - **Scales to thousands of files**: Hierarchical reduce, context-budget-aware batching,
   stratified sampling by project and directory, collision-free caching.
 
@@ -31,9 +41,13 @@ Phase 1b: Sample          Stratified sampling by project, directory, and complex
                           (default), or most-recently-modified files (--recent-files).
 Phase 2: Analyze          LLM analyzes each sampled file individually (one file per call).
                           Each analysis is tagged with the file's project name.
+                          Outputs prose + structured JSON data block per file.
 Phase 2b: Skeleton Scan   LLM scans skeletons of remaining files in batches for broad coverage.
+                          Near-duplicate skeletons are deduplicated before LLM reduction.
 Phase 3: Synthesize       LLM merges all analyses into a SKILL.md per category.
                           Produces universal patterns + project-specific variations.
+                          Deterministic skeleton stats and merged structured data are
+                          injected as authoritative numbers alongside the prose.
 Phase 4: Validate         (optional) LLM checks SKILL.md against unseen files, including
                           naming compliance, ordering compliance, and project accuracy.
 ```
@@ -203,6 +217,8 @@ options:
   --validate             Run validation against unseen files
   --clean                Clear cache and start fresh
   --skip-skeleton-overview  Skip broad skeleton scan (faster)
+  --parallel N           Max concurrent LLM requests (default: 4)
+  --max-skill-lines N    Max lines in generated SKILL.md (default: 800)
   --seed N               Random seed for sampling (default: 42)
   --recent-files         Sample the N most recently modified files (by mtime)
                          instead of stratified random sampling
@@ -237,6 +253,7 @@ The `.skill-gen-work/` directory stores all intermediate results:
 │   ├── skeletons/               # Structural skeletons with ordering/naming metadata
 │   ├── analyses/                # Per-file LLM analysis (tagged with project name)
 │   ├── skeleton_overview.md     # Broad skeleton batch summary
+│   ├── merged_structured_data.txt  # Deterministically merged JSON from analyses
 │   └── SKILL_draft.md           # Synthesis result (universal + project-specific)
 ...
 ```
@@ -301,6 +318,60 @@ If a skeleton looks wrong, check the `_extract_*_skeleton()` functions.
   LLM gets you 80% of the way; your domain knowledge fills the remaining 20%.
 - **Model choice matters** — larger models (34B+) produce noticeably better synthesis.
   The per-file analysis works fine with 8B models.
+
+## Fidelity Preservation
+
+The pipeline progressively distills information through multiple LLM summarization
+phases. Several mechanisms prevent important details from being lost:
+
+### Structured Data (deterministic merge)
+
+Each per-file analysis includes a `STRUCTURED_DATA` JSON block with specific fields
+for naming, ordering, annotations, formatting, and patterns. These blocks are extracted
+and merged deterministically using frequency counting and set union — no LLM
+re-interpretation needed. The merged data is passed into the synthesis prompt as
+authoritative statistics.
+
+### Aggregated Skeleton Statistics
+
+Formatting metadata (brace placement counts, one-liner counts, getter/setter
+proximity, member spacing) is parsed directly from ALL skeleton files and aggregated
+into hard numbers. These bypass the LLM summarization entirely and are injected into
+the synthesis prompt with a note that they take priority over conflicting prose.
+
+### Near-Duplicate Deduplication
+
+Before each hierarchical LLM reduction, chunks are compared using Jaccard similarity
+(line-level, threshold 0.85). Near-identical chunks are collapsed into a single
+representative with a count annotation. This prevents the LLM from wasting context
+on redundant content.
+
+### Rare Pattern Preservation
+
+All reduction prompts explicitly instruct the LLM to preserve patterns seen in only
+1–2 files in a separate "Rare/Notable Patterns" section. The synthesis prompt includes
+a dedicated output section for these. This prevents minority conventions from being
+silently merged into dominant patterns or dropped.
+
+### Tuning the Output Size
+
+The `--max-skill-lines` flag (default: 800) controls how much detail the final
+SKILL.md retains. Increase it for more comprehensive output at the cost of a longer
+document:
+
+```bash
+# More detail
+python generate_skills.py /src --max-skill-lines 1200
+
+# Compact output
+python generate_skills.py /src --max-skill-lines 500
+```
+
+### Source Truncation Budget
+
+Per-file analysis reads 55% of the context budget for raw source code (keeping
+the beginning and tail, discarding the middle for large files). The remaining
+budget is used for the skeleton, prompt template, and LLM output.
 
 ## Scaling to Large Codebases (1000+ files)
 

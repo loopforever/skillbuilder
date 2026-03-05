@@ -259,6 +259,9 @@ CHARS_PER_TOKEN = 3.5
 # Module-level token budget, set from --context-budget CLI arg
 _token_budget = 100_000
 
+# Module-level max skill lines, set from --max-skill-lines CLI arg
+_max_skill_lines = 800
+
 # Module-level max parallel LLM requests, set from --parallel CLI arg
 _max_workers = 4
 
@@ -568,7 +571,7 @@ def _analyze_single_file(
     # Read raw source, truncated to fit comfortably in context
     try:
         raw = Path(p).read_text(errors="replace")
-        raw = _truncate_source(raw, int(_char_budget() * 0.4))
+        raw = _truncate_source(raw, int(_char_budget() * 0.55))
     except Exception:
         raw = "[could not read file]"
 
@@ -698,6 +701,68 @@ def _hierarchical_reduce(
     return current[0] if current else ""
 
 
+def _deduplicate_chunks(chunks: List[str], similarity_threshold: float = 0.85) -> List[str]:
+    """
+    Deterministically remove near-duplicate chunks before LLM reduction.
+
+    Uses line-level set similarity (Jaccard index) to identify chunks that are
+    essentially the same content. When duplicates are found, keeps one representative
+    and appends a count note. This lets the LLM spend its capacity on genuinely
+    distinct patterns rather than re-discovering duplicates.
+    """
+    if len(chunks) <= 1:
+        return chunks
+
+    def _line_set(text):
+        """Normalize and extract meaningful lines as a set for comparison."""
+        lines = set()
+        for line in text.split("\n"):
+            stripped = line.strip()
+            # Skip empty lines, comments, and very short lines
+            if stripped and len(stripped) > 5:
+                lines.add(stripped.lower())
+        return lines
+
+    def _jaccard(s1, s2):
+        if not s1 or not s2:
+            return 0.0
+        intersection = len(s1 & s2)
+        union = len(s1 | s2)
+        return intersection / union if union > 0 else 0.0
+
+    line_sets = [_line_set(c) for c in chunks]
+    merged = [False] * len(chunks)
+    merge_counts = [1] * len(chunks)
+
+    # Greedily merge duplicates: for each chunk, check if it's similar to
+    # an earlier non-merged chunk
+    for i in range(1, len(chunks)):
+        if merged[i]:
+            continue
+        for j in range(i):
+            if merged[j]:
+                continue
+            if _jaccard(line_sets[i], line_sets[j]) >= similarity_threshold:
+                merged[i] = True
+                merge_counts[j] += 1
+                break
+
+    result = []
+    for i, chunk in enumerate(chunks):
+        if merged[i]:
+            continue
+        if merge_counts[i] > 1:
+            result.append(f"{chunk}\n\n[NOTE: {merge_counts[i]} near-identical files exhibited this pattern]")
+        else:
+            result.append(chunk)
+
+    deduped = len(chunks) - len(result)
+    if deduped > 0:
+        print(f"      dedup: {len(chunks)} chunks -> {len(result)} ({deduped} near-duplicates merged)")
+
+    return result
+
+
 def _pack_batches(chunks: List[str], char_budget: int) -> List[List[str]]:
     """
     Pack chunks into batches where each batch's total length fits in char_budget.
@@ -722,6 +787,313 @@ def _pack_batches(chunks: List[str], char_budget: int) -> List[List[str]]:
         batches.append(current_batch)
 
     return batches
+
+
+def _extract_structured_data(analysis_text: str) -> Optional[dict]:
+    """Extract the STRUCTURED_DATA JSON block from an analysis text."""
+    import re as _re
+    match = _re.search(
+        r'```(?:json)?\s*STRUCTURED_DATA\s*\n(.*?)```',
+        analysis_text,
+        _re.DOTALL,
+    )
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1).strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _merge_structured_data(data_list: List[dict]) -> str:
+    """
+    Deterministically merge structured JSON data from multiple file analyses.
+
+    For each field:
+    - Strings: count occurrences, report dominant + variants
+    - Arrays: union all values with frequency counts
+    - Booleans: count True vs False
+    - Numbers: report min/median/max/mode
+    """
+    if not data_list:
+        return ""
+
+    lines = []
+
+    def _merge_string_field(label, values):
+        """Summarize a string field across files."""
+        counts = Counter(v for v in values if v is not None)
+        if not counts:
+            return
+        lines.append(f"\n{label}:")
+        for val, freq in counts.most_common():
+            lines.append(f"  {val}: {freq} files")
+
+    def _merge_array_field(label, arrays):
+        """Union arrays across files with frequency counts."""
+        counts = Counter()
+        for arr in arrays:
+            if isinstance(arr, list):
+                for item in arr:
+                    counts[item] += 1
+        if not counts:
+            return
+        lines.append(f"\n{label}:")
+        for val, freq in counts.most_common():
+            lines.append(f"  {val}: {freq} occurrences")
+
+    def _merge_bool_field(label, values):
+        """Count True vs False."""
+        t = sum(1 for v in values if v is True)
+        f = sum(1 for v in values if v is False)
+        if t + f == 0:
+            return
+        lines.append(f"\n{label}: True={t}, False={f}")
+
+    def _merge_number_field(label, values):
+        """Report mode for number fields."""
+        nums = [v for v in values if isinstance(v, (int, float))]
+        if not nums:
+            return
+        counts = Counter(nums)
+        mode_val, mode_freq = counts.most_common(1)[0]
+        lines.append(f"\n{label}: mode={mode_val} ({mode_freq} files), range=[{min(nums)}, {max(nums)}]")
+
+    # Naming section
+    lines.append("=== Naming (deterministic merge) ===")
+    _merge_string_field("Class casing", [d.get("naming", {}).get("class_casing") for d in data_list])
+    _merge_string_field("Class suffix", [d.get("naming", {}).get("class_suffix") for d in data_list])
+    _merge_string_field("Method casing", [d.get("naming", {}).get("method_casing") for d in data_list])
+    _merge_array_field("Method prefixes", [d.get("naming", {}).get("method_prefixes", []) for d in data_list])
+    _merge_string_field("Field casing", [d.get("naming", {}).get("field_casing") for d in data_list])
+    _merge_string_field("Field prefix", [d.get("naming", {}).get("field_prefix") for d in data_list])
+    _merge_array_field("Boolean naming", [d.get("naming", {}).get("boolean_naming", []) for d in data_list])
+    _merge_string_field("Constant casing", [d.get("naming", {}).get("constant_casing") for d in data_list])
+    _merge_string_field("Param casing", [d.get("naming", {}).get("param_casing") for d in data_list])
+
+    # Ordering section
+    lines.append("\n=== Ordering (deterministic merge) ===")
+    _merge_array_field("Import groups", [d.get("ordering", {}).get("imports", []) for d in data_list])
+    # For field/method ordering, show the full sequences with frequency
+    field_orders = [
+        " -> ".join(d.get("ordering", {}).get("fields", []))
+        for d in data_list
+        if d.get("ordering", {}).get("fields")
+    ]
+    if field_orders:
+        _merge_string_field("Field ordering sequences", field_orders)
+    method_orders = [
+        " -> ".join(d.get("ordering", {}).get("methods", []))
+        for d in data_list
+        if d.get("ordering", {}).get("methods")
+    ]
+    if method_orders:
+        _merge_string_field("Method ordering sequences", method_orders)
+
+    # Annotations section
+    lines.append("\n=== Annotations (deterministic merge) ===")
+    _merge_array_field("Class-level annotations", [d.get("annotations", {}).get("class_level", []) for d in data_list])
+    _merge_array_field("Field-level annotations", [d.get("annotations", {}).get("field_level", []) for d in data_list])
+    _merge_array_field("Method-level annotations", [d.get("annotations", {}).get("method_level", []) for d in data_list])
+
+    # Formatting section
+    lines.append("\n=== Formatting (deterministic merge) ===")
+    _merge_string_field("Brace style", [d.get("formatting", {}).get("brace_style") for d in data_list])
+    _merge_string_field("Class brace style", [d.get("formatting", {}).get("class_brace_style") for d in data_list])
+    _merge_bool_field("One-line getters", [d.get("formatting", {}).get("one_line_getters") for d in data_list])
+    _merge_bool_field("One-line setters", [d.get("formatting", {}).get("one_line_setters") for d in data_list])
+    _merge_number_field("Blank lines between fields", [d.get("formatting", {}).get("blank_lines_between_fields") for d in data_list])
+    _merge_number_field("Blank lines between methods", [d.get("formatting", {}).get("blank_lines_between_methods") for d in data_list])
+    _merge_bool_field("Getter/setter adjacent", [d.get("formatting", {}).get("getter_setter_adjacent") for d in data_list])
+    _merge_bool_field("Single-statement braces", [d.get("formatting", {}).get("single_statement_braces") for d in data_list])
+
+    # Patterns section
+    lines.append("\n=== Patterns (deterministic merge) ===")
+    _merge_array_field("Design patterns", [d.get("patterns", {}).get("design_patterns", []) for d in data_list])
+    _merge_string_field("Error handling", [d.get("patterns", {}).get("error_handling") for d in data_list])
+    _merge_string_field("Null handling", [d.get("patterns", {}).get("null_handling") for d in data_list])
+    _merge_string_field("Base class", [d.get("patterns", {}).get("base_class") for d in data_list])
+    _merge_array_field("Interfaces", [d.get("patterns", {}).get("interfaces", []) for d in data_list])
+    _merge_array_field("Standard methods", [d.get("patterns", {}).get("standard_methods", []) for d in data_list])
+
+    return "\n".join(lines)
+
+
+def _aggregate_skeleton_stats(skeletons_for_cat: dict) -> str:
+    """
+    Deterministically extract and aggregate hard numbers from skeleton metadata.
+
+    Parses the // [FORMATTING: ...], // [MEMBER ORDER: ...], and // [NAMING: ...]
+    comments from all skeletons and produces aggregate statistics that can be
+    passed directly into synthesis without LLM re-interpretation.
+    """
+    import re as _re
+
+    formatting_totals = {
+        "brace_same_line": 0,
+        "brace_next_line": 0,
+        "class_brace_same_line": 0,
+        "class_brace_next_line": 0,
+        "one_line_methods": 0,
+        "multi_line_methods": 0,
+        "one_line_getters": 0,
+        "one_line_setters": 0,
+        "getter_setter_pairs": 0,
+    }
+    member_spacing_counts = Counter()
+    ordering_sequences = Counter()
+    class_suffixes = Counter()
+    field_naming_styles = Counter()
+    method_prefix_counts = Counter()
+    files_counted = 0
+
+    for _path, skel in skeletons_for_cat.items():
+        files_counted += 1
+
+        # Parse FORMATTING line
+        fmt_match = _re.search(r'// \[FORMATTING: (.*?)\]', skel)
+        if fmt_match:
+            fmt_str = fmt_match.group(1)
+
+            # Brace placement
+            m = _re.search(r'braces=same-line\b(?!\()', fmt_str)
+            if m:
+                formatting_totals["brace_same_line"] += 1
+            m = _re.search(r'braces=next-line\b(?!\()', fmt_str)
+            if m:
+                formatting_totals["brace_next_line"] += 1
+            m = _re.search(r'braces=same-line\((\d+)\)/next-line\((\d+)\)', fmt_str)
+            if m:
+                formatting_totals["brace_same_line"] += int(m.group(1))
+                formatting_totals["brace_next_line"] += int(m.group(2))
+
+            # Class brace
+            if "class-brace=same-line" in fmt_str:
+                formatting_totals["class_brace_same_line"] += 1
+            elif "class-brace=next-line" in fmt_str:
+                formatting_totals["class_brace_next_line"] += 1
+
+            # One-line methods
+            m = _re.search(r'one-line-methods=(\d+)', fmt_str)
+            if m:
+                formatting_totals["one_line_methods"] += int(m.group(1))
+            m = _re.search(r'multi-line-methods=(\d+)', fmt_str)
+            if m:
+                formatting_totals["multi_line_methods"] += int(m.group(1))
+
+            # One-line getters/setters
+            m = _re.search(r'getters=(\d+)', fmt_str)
+            if m:
+                formatting_totals["one_line_getters"] += int(m.group(1))
+            m = _re.search(r'setters=(\d+)', fmt_str)
+            if m:
+                formatting_totals["one_line_setters"] += int(m.group(1))
+
+            # Getter-setter pairs
+            m = _re.search(r'getter-setter-pairs=(\d+)', fmt_str)
+            if m:
+                formatting_totals["getter_setter_pairs"] += int(m.group(1))
+
+            # Member spacing
+            m = _re.search(r'member-spacing=(\d+)-blank-lines', fmt_str)
+            if m:
+                member_spacing_counts[int(m.group(1))] += 1
+            else:
+                for sm in _re.finditer(r'(\d+)bl\((\d+)\)', fmt_str):
+                    member_spacing_counts[int(sm.group(1))] += int(sm.group(2))
+
+        # Parse MEMBER ORDER line
+        order_match = _re.search(r'// \[MEMBER ORDER: (.*?)\]', skel)
+        if order_match:
+            ordering_sequences[order_match.group(1).strip()] += 1
+
+        # Parse NAMING line
+        naming_match = _re.search(r'// \[NAMING: (.*?)\]', skel)
+        if naming_match:
+            naming_str = naming_match.group(1)
+            # Class suffix
+            m = _re.search(r'class suffix=(\w+)', naming_str)
+            if m:
+                class_suffixes[m.group(1)] += 1
+            # Field naming style
+            m = _re.search(r'fields=(\w+)', naming_str)
+            if m:
+                field_naming_styles[m.group(1)] += 1
+
+        # Parse METHOD NAMING line
+        method_match = _re.search(r'// \[METHOD NAMING: (.*?)\]', skel)
+        if method_match:
+            for mp in _re.finditer(r'(\w+)\*\((\d+)\)', method_match.group(1)):
+                method_prefix_counts[mp.group(1)] += int(mp.group(2))
+
+    if files_counted == 0:
+        return ""
+
+    # Build output
+    lines = [f"Total files with skeletons: {files_counted}"]
+
+    # Brace placement
+    same = formatting_totals["brace_same_line"]
+    nxt = formatting_totals["brace_next_line"]
+    if same + nxt > 0:
+        lines.append(f"\nBrace Placement (method/control-flow):")
+        lines.append(f"  Same line (K&R): {same} occurrences")
+        lines.append(f"  Next line (Allman): {nxt} occurrences")
+        pct = same / (same + nxt) * 100
+        lines.append(f"  -> {pct:.0f}% same-line")
+
+    csame = formatting_totals["class_brace_same_line"]
+    cnxt = formatting_totals["class_brace_next_line"]
+    if csame + cnxt > 0:
+        lines.append(f"\nClass Brace Placement:")
+        lines.append(f"  Same line: {csame} files")
+        lines.append(f"  Next line: {cnxt} files")
+
+    # One-line methods
+    one = formatting_totals["one_line_methods"]
+    multi = formatting_totals["multi_line_methods"]
+    if one + multi > 0:
+        lines.append(f"\nMethod Body Style:")
+        lines.append(f"  One-line methods: {one} (getters={formatting_totals['one_line_getters']}, setters={formatting_totals['one_line_setters']})")
+        lines.append(f"  Multi-line methods: {multi}")
+
+    # Getter-setter proximity
+    gs = formatting_totals["getter_setter_pairs"]
+    if gs > 0:
+        lines.append(f"\nGetter/Setter Proximity:")
+        lines.append(f"  Adjacent getter-setter pairs: {gs}")
+
+    # Member spacing
+    if member_spacing_counts:
+        lines.append(f"\nMember Spacing (blank lines between members):")
+        for count, freq in member_spacing_counts.most_common():
+            lines.append(f"  {count} blank line(s): {freq} occurrences")
+
+    # Member ordering
+    if ordering_sequences:
+        lines.append(f"\nMember Ordering Patterns (top {min(5, len(ordering_sequences))}):")
+        for seq, freq in ordering_sequences.most_common(5):
+            lines.append(f"  [{freq}x] {seq}")
+
+    # Class suffixes
+    if class_suffixes:
+        lines.append(f"\nClass Name Suffixes:")
+        for suffix, freq in class_suffixes.most_common():
+            lines.append(f"  *{suffix}: {freq} files")
+
+    # Field naming
+    if field_naming_styles:
+        lines.append(f"\nField Naming Styles:")
+        for style, freq in field_naming_styles.most_common():
+            lines.append(f"  {style}: {freq} files")
+
+    # Method prefixes
+    if method_prefix_counts:
+        lines.append(f"\nMethod Verb Prefixes (across all files):")
+        for prefix, freq in method_prefix_counts.most_common(15):
+            lines.append(f"  {prefix}*: {freq} methods")
+
+    return "\n".join(lines)
 
 
 def phase_skeleton_overview(
@@ -786,9 +1158,15 @@ def phase_skeleton_overview(
                 f"Identify high-level patterns: naming conventions, common annotations, "
                 f"typical class structures, recurring method signatures, inheritance patterns, "
                 f"and any notable conventions.\n"
-                f"Be thorough but concise — output a structured list of patterns.\n\n"
+                f"Note frequency for each pattern (how many files exhibited it).\n"
+                f"RARE PATTERNS: Patterns observed in only 1-2 files MUST be preserved "
+                f"in a separate '### Rare/Notable Patterns' section. Do NOT discard them.\n"
+                f"Be thorough — output a structured list of patterns.\n\n"
                 f"{combined}"
             )
+
+        # Deduplicate near-identical skeleton chunks before LLM reduction (change C)
+        formatted_chunks = _deduplicate_chunks(formatted_chunks)
 
         overview = _hierarchical_reduce(
             formatted_chunks,
@@ -809,6 +1187,7 @@ def phase_synthesize(
     skeleton_overviews: dict,
     work_dir: Path,
     file_to_project: dict = None,
+    skeletons: dict = None,
 ) -> dict:
     """
     Phase 3: merge all analyses into a single SKILL.md per category.
@@ -835,6 +1214,19 @@ def phase_synthesize(
                 f"### {Path(p).name}  [project: {proj}]\n{text}"
             )
 
+        # Extract and merge structured JSON data from analyses (change B)
+        structured_data_list = []
+        for p, text in file_analyses.items():
+            sd = _extract_structured_data(text)
+            if sd:
+                structured_data_list.append(sd)
+        merged_structured = ""
+        if structured_data_list:
+            merged_structured = _merge_structured_data(structured_data_list)
+            merge_cache = cat_dir / "merged_structured_data.txt"
+            merge_cache.write_text(merged_structured)
+            print(f"    [{cat}] extracted structured data from {len(structured_data_list)}/{len(file_analyses)} analyses")
+
         # Build project distribution stats
         project_stats = ""
         if file_to_project:
@@ -848,6 +1240,15 @@ def phase_synthesize(
 
         skel_overview = skeleton_overviews.get(cat, "")
 
+        # Aggregate deterministic stats from ALL skeletons (change D)
+        # and merged structured analysis data (change B)
+        skel_stats_parts = []
+        if skeletons and cat in skeletons:
+            skel_stats_parts.append(_aggregate_skeleton_stats(skeletons[cat]))
+        if merged_structured:
+            skel_stats_parts.append(merged_structured)
+        skel_stats = "\n\n".join(p for p in skel_stats_parts if p)
+
         # Check if everything fits in one prompt
         total_analysis_chars = sum(len(c) for c in analysis_chunks)
         total_chars = total_analysis_chars + len(skel_overview) + len(project_stats) + 3000
@@ -860,6 +1261,8 @@ def phase_synthesize(
                 analyses_text=all_text,
                 skeleton_overview=skel_overview,
                 project_stats=project_stats,
+                skeleton_stats=skel_stats,
+                max_skill_lines=_max_skill_lines,
             )
             result = call_llm(prompt)
         else:
@@ -881,11 +1284,18 @@ def phase_synthesize(
                     f"- Preserve specific examples (annotation names, method signatures, "
                     f"field names, naming conventions, ordering conventions)\n"
                     f"- Flag any contradictions or variations between projects\n"
-                    f"Be thorough but concise.\n\n{combined}"
+                    f"- RARE PATTERNS: Patterns observed in only 1-2 files MUST be preserved "
+                    f"in a separate '### Rare/Notable Patterns' section at the end. "
+                    f"Do NOT merge these with common patterns — they may represent "
+                    f"important project-specific conventions or edge cases.\n"
+                    f"Be thorough — prefer completeness over brevity.\n\n{combined}"
                 )
 
+            # Deduplicate near-identical analyses before LLM reduction (change C)
+            deduped_chunks = _deduplicate_chunks(analysis_chunks)
+
             condensed = _hierarchical_reduce(
-                analysis_chunks,
+                deduped_chunks,
                 analysis_reduce_prompt,
                 label=cat,
                 work_dir=cat_dir,
@@ -903,8 +1313,10 @@ def phase_synthesize(
                         combined = "\n\n".join(texts)
                         return (
                             f"Consolidate these pattern observations about {category_label} "
-                            f"files into a concise summary. Remove duplicates, keep specific "
-                            f"examples. Preserve project-specific notes.\n\n{combined}"
+                            f"files into a summary. Remove duplicates, keep specific "
+                            f"examples. Preserve project-specific notes.\n"
+                            f"RARE PATTERNS: Keep patterns observed in only 1-2 files in a "
+                            f"separate '### Rare/Notable Patterns' section.\n\n{combined}"
                         )
                     skel_overview = _hierarchical_reduce(
                         paras,
@@ -919,6 +1331,8 @@ def phase_synthesize(
                 analyses_text=condensed,
                 skeleton_overview=skel_overview,
                 project_stats=project_stats,
+                skeleton_stats=skel_stats,
+                max_skill_lines=_max_skill_lines,
             )
             result = call_llm(prompt)
 
@@ -1157,6 +1571,13 @@ LLM server compatibility:
              "(default: 4)",
     )
     parser.add_argument(
+        "--max-skill-lines",
+        type=int,
+        default=800,
+        help="Maximum lines for the generated SKILL.md document. Higher values "
+             "retain more detail at the cost of a longer document. (default: 800)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -1173,9 +1594,10 @@ LLM server compatibility:
     random.seed(args.seed)
 
     # Set the global token budget for batch sizing
-    global _token_budget, _max_workers
+    global _token_budget, _max_workers, _max_skill_lines
     _token_budget = args.context_budget
     _max_workers = max(1, args.parallel)
+    _max_skill_lines = args.max_skill_lines
 
     # Parse --header flags into a dict
     extra_headers = {}
@@ -1285,6 +1707,7 @@ LLM server compatibility:
     skills = phase_synthesize(
         analyses, skeleton_overviews, work_dir,
         file_to_project=file_to_project,
+        skeletons=skeletons,
     )
 
     validation_reports = {}
