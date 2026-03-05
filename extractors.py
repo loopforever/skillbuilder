@@ -26,16 +26,22 @@ CATEGORIES = {
         "label": "Java Model",
         "description": "Java model/entity classes",
         "globs": ["**/model/*.java", "**/models/*.java"],
+        # Only include files that look like real model classes
+        "content_patterns": [r"\bclass\s+\w+"],
     },
     "java-daos": {
         "label": "Java DAO",
         "description": "Java Data Access Objects",
         "globs": ["**/dao/*DAO.java", "**/daos/*DAO.java"],
+        # Only include files that contain class definitions
+        "content_patterns": [r"\bclass\s+\w+"],
     },
     "java-actionbeans": {
         "label": "Java ActionBean",
         "description": "Java ActionBean controllers",
         "globs": ["**/action/*Action.java", "**/actions/*Action.java"],
+        # Only include files implementing ActionBean
+        "content_patterns": [r"\bActionBean\b"],
     },
     "frontend": {
         "label": "Front-End (HTML/CSS/JS/Vue)",
@@ -141,6 +147,21 @@ def discover_files(root_dir: str) -> Dict[str, List[str]]:
                         continue
 
                 matched.add(path_str)
+
+        # Content regex filter: if content_patterns is defined, at least one
+        # pattern must match somewhere in the file contents for inclusion.
+        content_patterns = cat_def.get("content_patterns")
+        if content_patterns:
+            compiled = [re.compile(p) for p in content_patterns]
+            filtered = set()
+            for fpath in matched:
+                try:
+                    text = Path(fpath).read_text(errors="ignore")
+                except OSError:
+                    continue
+                if any(rx.search(text) for rx in compiled):
+                    filtered.add(fpath)
+            matched = filtered
 
         result[cat_key] = sorted(matched)
 

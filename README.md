@@ -253,9 +253,22 @@ CATEGORIES = {
         "label": "Java Service",
         "description": "Service layer classes",
         "globs": ["**/service/*.java", "**/services/*Service.java"],
+        # Optional: only include files whose contents match at least one regex
+        "content_patterns": [r"@Service", r"\bclass\s+\w+Service\b"],
     },
 }
 ```
+
+Category fields:
+- **`label`** — Display name for the category.
+- **`description`** — Human-readable description.
+- **`globs`** — List of glob patterns for file matching.
+- **`exclude_patterns`** *(optional)* — Substring patterns to exclude from matches.
+- **`max_file_size`** *(optional)* — Skip files larger than this (bytes).
+- **`content_patterns`** *(optional)* — List of regex patterns matched against file
+  contents. When defined, at least one pattern must match or the file is excluded.
+  Useful for filtering globbed files that match by path but aren't the right type
+  (e.g., ensuring `*.java` files in a `model/` directory actually contain a class).
 
 ### Tuning Prompts
 
