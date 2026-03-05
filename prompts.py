@@ -103,7 +103,25 @@ analyses of many other files, so every detail matters.
    - Configuration patterns
    - Dependency injection approach
 
-### 8. Notable Specifics
+### 8. Code Formatting & Layout Style (CRITICAL — be very specific)
+   - **Brace placement**: Are opening braces on the SAME LINE as the declaration (K&R/1TBS style,
+     e.g. `public void foo() {{`) or on the NEXT LINE (Allman style, e.g. brace on its own line)?
+     Check class declarations, method declarations, if/for/while blocks, and inner classes separately.
+   - **One-line methods**: Are simple getter/setter methods written on a SINGLE LINE
+     (e.g. `public String getName() {{ return name; }}`) or always expanded to multiple lines?
+     Also note any other short/transient methods that use single-line style.
+   - **Line breaks between members**: How many BLANK LINES separate consecutive members?
+     0 blank lines (fields back-to-back)? 1 blank line between each method? 2 blank lines
+     between method groups? Are there different spacing rules for fields vs methods?
+   - **Getter/setter proximity**: Are getters and setters for the same property placed
+     IMMEDIATELY ADJACENT (e.g. getName() followed directly by setName() with only 0-1
+     blank lines), or are all getters grouped together separately from all setters?
+   - **Statement braces**: Are braces used for SINGLE-STATEMENT if/for/while blocks,
+     or are braces omitted for one-liners? (e.g. `if (x) return y;` vs `if (x) {{ return y; }}`)
+   - **Field grouping**: Are related fields grouped with no blank lines between them,
+     with blank lines separating different groups?
+
+### 9. Notable Specifics
    - Anything unusual or project-specific
    - Anti-patterns or inconsistencies worth documenting
    - Implicit conventions that might not be obvious
@@ -194,6 +212,37 @@ The template MUST reflect the correct member ordering convention.]
 3. How should imports be ordered?
 Show this as a numbered list showing the canonical ordering from top to bottom.]
 
+## Code Formatting & Layout Style
+
+[Document the exact formatting conventions observed. Be specific about each:
+
+### Brace Placement
+- Where does the opening brace go for class declarations? (same line or next line?)
+- Where does the opening brace go for method declarations? (same line or next line?)
+- Where does the opening brace go for control flow (if/for/while)?
+- Show a short example of the brace style.
+
+### One-Line Methods
+- Are simple getters/setters written as single-line methods?
+  (e.g. `public String getName() {{ return name; }}`)
+- Are other short/transient methods written on one line?
+- What is the threshold — when does a method get expanded to multiple lines?
+
+### Line Breaks & Spacing
+- How many blank lines between consecutive fields?
+- How many blank lines between consecutive methods?
+- How many blank lines between field section and method section?
+- Are there different spacing rules for different member groups?
+
+### Getter/Setter Proximity
+- Are getter and setter for the same property placed immediately adjacent?
+  (e.g. getName() immediately followed by setName())
+- Or are all getters grouped together, then all setters?
+
+### Statement Braces
+- Are braces required for single-statement if/for/while blocks?
+- Or are braces omitted for one-liners?]
+
 ## Naming Conventions
 
 [Very specific naming rules. For each of these, state the exact convention:
@@ -249,7 +298,8 @@ all the universal patterns above. This should be 30-60 lines, not a full product
 
 - Only document patterns you actually observed in the analyses. Do NOT invent conventions.
 - If you saw variation/inconsistency, document the dominant pattern and note the variation.
-- Pay special attention to NAMING and ORDERING — these are the most common style violations.
+- Pay special attention to NAMING, ORDERING, and FORMATTING (brace placement, line breaks,
+  one-line methods, getter/setter proximity) — these are the most common style violations.
 - When a pattern is unique to a specific project, put it in "Project-Specific Variations",
   not in the universal sections.
 - Be specific: use actual annotation names, method signatures, field names as examples.
@@ -296,10 +346,12 @@ For each test file:
    the documented conventions? Note any deviations.
 3. **Ordering Compliance**: Does the member ordering match the documented convention?
    Note any deviations.
-4. **Pattern Matches**: Which documented patterns are correctly present?
-5. **Gaps**: What patterns does this file use that are NOT in the SKILL.md?
-6. **Conflicts**: Does anything directly contradict the SKILL.md?
-7. **Project Accuracy**: If this file is from a specific project, do the project-specific
+4. **Formatting Compliance**: Does the brace placement, line break spacing, one-line method
+   style, and getter/setter proximity match the documented formatting conventions?
+5. **Pattern Matches**: Which documented patterns are correctly present?
+6. **Gaps**: What patterns does this file use that are NOT in the SKILL.md?
+7. **Conflicts**: Does anything directly contradict the SKILL.md?
+8. **Project Accuracy**: If this file is from a specific project, do the project-specific
    variations apply correctly?
 
 Then provide an overall assessment:
@@ -309,6 +361,8 @@ Then provide an overall assessment:
 - **Accuracy Score** (1-10): Are the documented patterns correct?
 - **Naming Convention Accuracy** (1-10): How accurate are the naming rules?
 - **Ordering Convention Accuracy** (1-10): How accurate is the member ordering description?
+- **Formatting Convention Accuracy** (1-10): How accurate are the brace placement, line break,
+  and code layout rules?
 - **Missing Patterns**: Significant patterns found in test files but absent from SKILL.md
 - **Suggested Additions**: Specific text to add to the SKILL.md to fill gaps
 - **Suggested Corrections**: Specific text to change in the SKILL.md
